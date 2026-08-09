@@ -452,7 +452,6 @@ local LOGIN_KEYS = {
     ["alif-8574"] = true,
     ["Kai-666"] = true,
     ["xzinyy-999"] = true,
-    ["7Vx-777"] = true,
 }
 
 local loginGui = Instance.new("ScreenGui")
@@ -1404,6 +1403,7 @@ local function runCookSequence()
     --   -> tunggu 1 detik
     --   -> E
     --   -> masak sekitar 46 detik
+    --   -> equip Empty Bag
     --   -> E ambil hasil
 
     local function waitStep(seconds, label)
@@ -1506,11 +1506,46 @@ local function runCookSequence()
     notify("COOKING", string.format("%.1fs", cookDelay))
     task.wait(cookDelay)
 
-    -- 5. E untuk mengambil hasil.
+    -- 5. EQUIP EMPTY BAG -> tunggu sebentar -> E untuk mengambil hasil.
     if State.AutoCook then
+        if countItem(CFG.EMPTY_BAG) <= 0 then
+            notify("MISSING ITEM", CFG.EMPTY_BAG, true)
+            State.CurrentStep = "MISSING: " .. CFG.EMPTY_BAG
+            State.Cooking = false
+            cookingBusy = false
+            return
+        end
+
+        State.CurrentStep = "EQUIP: " .. CFG.EMPTY_BAG
+        if not equipItem(CFG.EMPTY_BAG) then
+            notify("EQUIP FAILED", CFG.EMPTY_BAG, true)
+            State.CurrentStep = "EQUIP FAILED: " .. CFG.EMPTY_BAG
+            State.Cooking = false
+            cookingBusy = false
+            return
+        end
+
+        -- Pastikan Empty Bag benar-benar sudah berada di tangan sebelum E.
+        task.wait(0.5 + (math.random(1, 5) / 100))
+
+        if not State.AutoCook then
+            State.Cooking = false
+            cookingBusy = false
+            return
+        end
+
+        local held = getHeldItem(Player)
+        if held ~= CFG.EMPTY_BAG then
+            notify("EMPTY BAG NOT EQUIPPED", "Held: " .. tostring(held), true)
+            State.CurrentStep = "EMPTY BAG NOT EQUIPPED"
+            State.Cooking = false
+            cookingBusy = false
+            return
+        end
+
         State.CurrentStep = "PRESS E: COLLECT"
         pressE()
-        task.wait(0.4 + (math.random(1, 5) / 100))
+        task.wait(0.5 + (math.random(1, 5) / 100))
 
         State.CookedCount += 1
         State.CurrentStep = "COMPLETE"
@@ -1529,7 +1564,7 @@ task.spawn(function()
             elseif countItem(CFG.MEDIUM) > 0 then task.spawn(sellMarshmallow, CFG.MEDIUM)
             elseif countItem(CFG.SMALL) > 0 then task.spawn(sellMarshmallow, CFG.SMALL) end
         elseif State.AutoCook and not cookingBusy then
-            if countItem(CFG.WATER) > 0 and countItem(CFG.SUGAR) > 0 and countItem(CFG.GELATIN) > 0 then
+            if countItem(CFG.WATER) > 0 and countItem(CFG.SUGAR) > 0 and countItem(CFG.GELATIN) > 0 and countItem(CFG.EMPTY_BAG) > 0 then
                 task.spawn(runCookSequence)
             end
         end
