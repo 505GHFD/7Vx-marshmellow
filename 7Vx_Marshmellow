@@ -452,6 +452,7 @@ local LOGIN_KEYS = {
     ["alif-8574"] = true,
     ["Kai-666"] = true,
     ["xzinyy-999"] = true,
+    ["7Vx-777"] = true,
 }
 
 local loginGui = Instance.new("ScreenGui")
