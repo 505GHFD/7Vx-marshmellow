@@ -1718,9 +1718,27 @@ rainGui.Parent = HiddenUI
 
         section("AUTO COOK")
         local ck = card(105)
-        toggle(ck, "AUTO COOK", "AutoCook", 15, 22)
+        toggle(ck, "AUTO COOK", "AutoCook", 15, 22, function(enabled)
+            if enabled then
+                State.CurrentStep = "AUTO COOK: CHECKING"
+                if not cookingBusy then
+                    local ready =
+                        countItem(CFG.WATER) > 0 and
+                        countItem(CFG.SUGAR) > 0 and
+                        countItem(CFG.GELATIN) > 0
+                    if ready then
+                        task.spawn(runCookSequence)
+                    else
+                        notify("AUTO COOK", "Water, Sugar Block Bag, dan Gelatin harus tersedia.", true)
+                    end
+                end
+            else
+                State.CurrentStep = "AUTO COOK: OFF"
+            end
+        end)
         text(ck, "Step: " .. State.CurrentStep, 260, 25, 220, 22, 11, CFG.YELLOW)
-        text(ck, "Equip item -> benar-benar tekan keyboard E. Server game kamu yang memvalidasi.", 15, 65, 470, 20, 9, CFG.MUTED)
+        text(ck, "Equip item -> tekan keyboard E.", 15, 65, 470, 20, 9, CFG.MUTED)
+
         section("SMART AUTOMATION")
         local smart = card(110)
         toggle(smart, "SMART AUTO COOK", "SmartAuto", 15, 15)
@@ -2171,11 +2189,10 @@ rainGui.Parent = HiddenUI
             local sideways = flatRight * steer * 0.55
 
             local vertical = 0
-            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+            if UserInputService:IsKeyDown(Enum.KeyCode.E) then -- Naik ganti ke E
                 vertical += 1
             end
-            if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
-                or UserInputService:IsKeyDown(Enum.KeyCode.RightControl) then
+            if UserInputService:IsKeyDown(Enum.KeyCode.Q) then -- Turun ganti ke Q
                 vertical -= 1
             end
 
@@ -2265,10 +2282,20 @@ rainGui.Parent = HiddenUI
 
         flyVelocity = Instance.new("BodyVelocity")
         flyVelocity.Name = "7VxSmoothFly"
-        flyVelocity.MaxForce = Vector3.new(1e6, 1e6, 1e6)
+        flyVelocity.MaxForce = Vector3.new(1e9, 1e9, 1e9)
         flyVelocity.P = 9000
         flyVelocity.Velocity = Vector3.zero
         flyVelocity.Parent = root
+
+        -- Tambahan BodyGyro agar karakter tegak lurus
+        local flyGyro = Instance.new("BodyGyro")
+        flyGyro.Name = "7VxFlyGyro"
+        flyGyro.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
+        flyGyro.P = 9000
+        flyGyro.CFrame = root.CFrame
+        flyGyro.Parent = root
+
+        humanoid.PlatformStand = true
 
         flyConnection = game:GetService("RunService").Heartbeat:Connect(function(dt)
             if not State.Fly or not root.Parent then
@@ -2282,29 +2309,23 @@ rainGui.Parent = HiddenUI
             local move = humanoid.MoveDirection
             local vertical = 0
 
-            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-                vertical += 1
-            end
-            if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
-                vertical -= 1
-            end
+            if UserInputService:IsKeyDown(Enum.KeyCode.Space) then vertical += 1 end
+            if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then vertical -= 1 end
 
+            -- Smoothing Velocity
             local desired = move * State.FlySpeed + Vector3.new(0, vertical * State.FlySpeed, 0)
-            local alpha = math.clamp(dt * 7.5, 0, 1)
+            local alpha = math.clamp(dt * 10, 0, 1)
             flyVelocity.Velocity = flyVelocity.Velocity:Lerp(desired, alpha)
+            
+            -- Mengunci karakter agar menghadap sesuai kamera tapi rotasi Y tetap tegak
+            local flatLook = Vector3.new(camera.CFrame.LookVector.X, 0, camera.CFrame.LookVector.Z)
+            if flatLook.Magnitude > 0.01 then
+                flyGyro.CFrame = CFrame.lookAt(root.Position, root.Position + flatLook.Unit)
+            end
         end)
 
         notify("FLY", "ON | X untuk toggle | Speed " .. tostring(State.FlySpeed))
         return true
-    end
-
-    local function toggleFly()
-        if State.Fly then
-            stopFly()
-            notify("FLY", "OFF")
-        else
-            startFly()
-        end
     end
 
     local function stopFreeCam()
@@ -3104,88 +3125,108 @@ rainGui.Parent = HiddenUI
     end
 
     local function runCookSequence()
-        if cookingBusy then return end
+        if cookingBusy or not State.AutoCook then return end
         cookingBusy = true
         State.Cooking = true
 
-        -- Exact sequence:
-        -- Equip Water -> 1s -> stove ProximityPrompt -> 22s
-        -- Equip Sugar Block Bag -> 1s -> stove ProximityPrompt
-        -- Equip Gelatin -> 1s -> stove ProximityPrompt -> 46s
-        -- Equip Empty Bag -> 1s -> stove ProximityPrompt -> complete notification
+        -- AUTO COOK mengikuti pola "message (1).txt":
+        -- Water -> E -> 5.xs
+        -- Sugar Block Bag -> E -> 21.xs
+        -- Gelatin -> E -> 1.xs
+        -- E untuk mulai memasak -> 46.xs
+        -- E untuk mengambil hasil -> 2.xs
+        --
+        -- Randomized delay dipertahankan dengan range yang sama:
+        -- ingredient: +0.2 sampai +0.8 detik
+        -- cook:       +0.3 sampai +1.2 detik
+        -- result:     +0.1 sampai +0.5 detik
 
         local function stopCooking()
             State.Cooking = false
             cookingBusy = false
         end
 
-        local function cookInteract(label)
+        local function autoPressE(label)
             if not State.AutoCook then return false end
             State.CurrentStep = label
-            return interactCookingPrompt()
+            local ok = pressE()
+            return ok == true
+        end
+
+        local function equipAndPress(itemName, label)
+            if not equipForCook(itemName) then
+                stopCooking()
+                return false
+            end
+
+            if not State.AutoCook then
+                stopCooking()
+                return false
+            end
+
+            State.CurrentStep = "MEMEGANG: " .. itemName
+            if not autoPressE(label) then
+                notify("E FAILED", itemName, true)
+                State.CurrentStep = "E FAILED: " .. itemName
+                stopCooking()
+                return false
+            end
+
+            return true
         end
 
         -- WATER
-        if not equipForCook(CFG.WATER) then
-            stopCooking()
+        if not equipAndPress(CFG.WATER, "PRESS E: WATER") then
             return
         end
 
-        State.CurrentStep = "HOLD: WATER"
-        task.wait(1)
-
-        if not cookInteract("INTERACT: WATER") then
-            stopCooking()
-            return
+        do
+            local randomExtra = math.random(2, 8) / 10
+            State.CurrentStep = "MENUNGGU WATER"
+            task.wait(5 + randomExtra)
         end
-
-        task.wait(22)
 
         -- SUGAR BLOCK BAG
-        if not equipForCook(CFG.SUGAR) then
-            stopCooking()
+        if not equipAndPress(CFG.SUGAR, "PRESS E: SUGAR BLOCK BAG") then
             return
         end
 
-        State.CurrentStep = "HOLD: SUGAR BLOCK BAG"
-        task.wait(1)
-
-        if not cookInteract("INTERACT: SUGAR BLOCK BAG") then
-            stopCooking()
-            return
+        do
+            local randomExtra = math.random(2, 8) / 10
+            State.CurrentStep = "MENUNGGU SUGAR BLOCK BAG"
+            task.wait(21 + randomExtra)
         end
 
         -- GELATIN
-        if not equipForCook(CFG.GELATIN) then
+        if not equipAndPress(CFG.GELATIN, "PRESS E: GELATIN") then
+            return
+        end
+
+        do
+            local randomExtra = math.random(2, 8) / 10
+            State.CurrentStep = "MENUNGGU GELATIN"
+            task.wait(1 + randomExtra)
+        end
+
+        -- START COOKING
+        if not autoPressE("MEMASAK MARSHMELLOW") then
             stopCooking()
             return
         end
 
-        State.CurrentStep = "HOLD: GELATIN"
-        task.wait(1)
+        do
+            local cookDelay = 46 + (math.random(3, 12) / 10)
+            State.CurrentStep = "MEMASAK MARSHMELLOW"
+            task.wait(cookDelay)
+        end
 
-        if not cookInteract("INTERACT: GELATIN") then
+        -- TAKE RESULT
+        if not autoPressE("MENGAMBIL HASIL") then
             stopCooking()
             return
         end
 
-        task.wait(46)
-
-        -- EMPTY BAG
-        if not equipForCook(CFG.EMPTY_BAG) then
-            stopCooking()
-            return
-        end
-
-        State.CurrentStep = "HOLD: EMPTY BAG"
-        task.wait(1)
-
-        if not cookInteract("INTERACT: EMPTY BAG") then
-            stopCooking()
-            return
-        end
-
-        task.wait(0.4)
+        task.wait(2 + (math.random(1, 5) / 10))
 
         State.CookedCount += 1
         State.CurrentStep = "COMPLETE"
@@ -3206,8 +3247,13 @@ rainGui.Parent = HiddenUI
                 if countItem(CFG.SUGAR) < State.MinSugar then task.spawn(buyIngredient, CFG.SUGAR, State.MinSugar - countItem(CFG.SUGAR)) end
                 if countItem(CFG.GELATIN) < State.MinGelatin then task.spawn(buyIngredient, CFG.GELATIN, State.MinGelatin - countItem(CFG.GELATIN)) end
             elseif State.AutoCook and not cookingBusy then
-                local ready = countItem(CFG.WATER) > 0 and countItem(CFG.SUGAR) > 0 and countItem(CFG.GELATIN) > 0 and countItem(CFG.EMPTY_BAG) > 0
-                if ready and (State.SmartAuto or State.AutoCook) then task.spawn(runCookSequence) end
+                local ready =
+                    countItem(CFG.WATER) > 0 and
+                    countItem(CFG.SUGAR) > 0 and
+                    countItem(CFG.GELATIN) > 0
+                if ready then
+                    task.spawn(runCookSequence)
+                end
             end
             if State.Tab == "HOME" then renderTab() end
         end
@@ -3797,3 +3843,114 @@ rainGui.Parent = HiddenUI
 
     log("7Vx Marshmellow Loaded Successfully.")
     renderTab()
+
+-- ==========================================
+-- TOGGLE VEHICLE FLY (TOMBOL V)
+-- ==========================================
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.V then
+        toggleVehicleFly()
+    end
+end)
+
+-- ==========================================
+-- FIX ESP DRAWING API & TRACER (CURSOR TO HEAD)
+-- ==========================================
+local espCache = {}
+
+local function clearESP(player)
+    if espCache[player] then
+        for _, obj in pairs(espCache[player]) do
+            obj:Remove()
+        end
+        espCache[player] = nil
+    end
+end
+
+local function getESP(player)
+    if not espCache[player] then
+        espCache[player] = {
+            Box = Drawing.new("Square"),
+            Tracer = Drawing.new("Line"),
+            Name = Drawing.new("Text")
+        }
+        espCache[player].Box.Thickness = 1.5
+        espCache[player].Box.Filled = false
+        espCache[player].Tracer.Thickness = 1.5
+        espCache[player].Name.Size = 15
+        espCache[player].Name.Center = true
+        espCache[player].Name.Outline = true
+    end
+    return espCache[player]
+end
+
+RunService.RenderStepped:Connect(function()
+    -- Mendapatkan posisi Kursor Mouse untuk Tracer
+    local mousePos = UserInputService:GetMouseLocation()
+    
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= Player then
+            local espObj = getESP(player)
+            local char = player.Character
+            local shouldShow = State.ESP and char and char:FindFirstChild("HumanoidRootPart") and char:FindFirstChild("Head") and char:FindFirstChild("Humanoid") and char.Humanoid.Health > 0
+
+            if shouldShow then
+                local hrp = char.HumanoidRootPart
+                local head = char.Head
+                
+                local hrpPos, onScreen = workspace.CurrentCamera:WorldToViewportPoint(hrp.Position)
+                local headPos = workspace.CurrentCamera:WorldToViewportPoint(head.Position + Vector3.new(0, 0.5, 0))
+                local legPos = workspace.CurrentCamera:WorldToViewportPoint(hrp.Position - Vector3.new(0, 3, 0))
+                
+                local dist = (Player.Character and Player.Character:FindFirstChild("HumanoidRootPart")) and (hrp.Position - Player.Character.HumanoidRootPart.Position).Magnitude or 0
+
+                if onScreen and dist <= State.MaxDistance then
+                    local c = getESPColor()
+                    
+                    -- Box ESP
+                    if State.BoxESP then
+                        local height = legPos.Y - headPos.Y
+                        local width = height / 2
+                        espObj.Box.Size = Vector2.new(width, height)
+                        espObj.Box.Position = Vector2.new(hrpPos.X - width / 2, headPos.Y)
+                        espObj.Box.Color = c
+                        espObj.Box.Visible = true
+                    else
+                        espObj.Box.Visible = false
+                    end
+                    
+                    -- Tracer ESP (Kursor -> Kepala)
+                    if State.Tracers then
+                        espObj.Tracer.From = mousePos
+                        espObj.Tracer.To = Vector2.new(headPos.X, headPos.Y)
+                        espObj.Tracer.Color = c
+                        espObj.Tracer.Visible = true
+                    else
+                        espObj.Tracer.Visible = false
+                    end
+                    
+                    -- Name ESP
+                    if State.ShowName then
+                        espObj.Name.Text = string.format("%s [%.1fm]", player.Name, dist)
+                        espObj.Name.Position = Vector2.new(headPos.X, headPos.Y - 20)
+                        espObj.Name.Color = c
+                        espObj.Name.Visible = true
+                    else
+                        espObj.Name.Visible = false
+                    end
+                else
+                    espObj.Box.Visible = false
+                    espObj.Tracer.Visible = false
+                    espObj.Name.Visible = false
+                end
+            else
+                espObj.Box.Visible = false
+                espObj.Tracer.Visible = false
+                espObj.Name.Visible = false
+            end
+        end
+    end
+end)
+
+Players.PlayerRemoving:Connect(clearESP)
