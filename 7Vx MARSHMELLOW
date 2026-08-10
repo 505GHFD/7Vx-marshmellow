@@ -62,12 +62,6 @@ end
 
 local HiddenUI = getHiddenParent()
 
---==================================================
--- CONFIG & CONSTANTS
---==================================================
-local CFG = {
-    ...
-
     --==================================================
     -- CONFIG & CONSTANTS
     --==================================================
@@ -93,12 +87,12 @@ local CFG = {
         GELATIN = "Gelatin",
         EMPTY_BAG = "Empty Bag",
 
-        SMALL = "Small Marshmallow",
-        MEDIUM = "Medium Marshmallow",
-        LARGE = "Large Marshmallow",
+        SMALL = "Small Marshmellow Bag",
+        MEDIUM = "Medium Marshmellow Bag",
+        LARGE = "Large Marshmellow Bag",
 
         BUY_PRICE = { Water = 20, ["Sugar Block Bag"] = 100, Gelatin = 70 },
-        SELL_PRICE = { ["Large Marshmallow"] = 300, ["Medium Marshmallow"] = 200, ["Small Marshmallow"] = 100 },
+        SELL_PRICE = { ["Large Marshmellow Bag"] = 300, ["Medium Marshmellow Bag"] = 200, ["Small Marshmellow Bag"] = 100 },
     }
 
     --==================================================
@@ -547,12 +541,94 @@ local CFG = {
         lastEPress = os.clock()
 
         holdDuration = math.max(0.03, tonumber(holdDuration) or 0.08)
-        pcall(function()
+
+        -- Keyboard fallback. Cooking now prefers the actual ProximityPrompt
+        -- through interactCookingPrompt(), so this remains only a fallback.
+        local ok = pcall(function()
             VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
             task.wait(holdDuration)
             VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
         end)
-        return true
+
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+        end)
+
+        return ok
+    end
+
+    local function interactCookingPrompt()
+        local root = getRoot()
+        if not root then return false end
+
+        -- The screenshot shows a real ProximityPrompt on the stove.
+        -- Select the nearest enabled prompt around the player instead of
+        -- blindly sending a keyboard event.
+        local prompt, promptDist = findNearestInteractPrompt(STOVE_DISTANCE + 2, {
+            "stove", "cook", "cooking", "pot", "proximity"
+        })
+
+        -- Some games name the prompt simply "ProximityPrompt", so retry
+        -- without keywords if the keyword pass did not find it.
+        if not prompt then
+            prompt, promptDist = findNearestInteractPrompt(STOVE_DISTANCE + 2, {})
+        end
+
+        if not prompt then
+            notify("COOK", "ProximityPrompt stove tidak ditemukan.", true)
+            return false
+        end
+
+        local part = prompt.Parent
+        if part and part:IsA("Attachment") then
+            part = part.Parent
+        end
+        if not part or not part:IsA("BasePart") then
+            part = prompt:FindFirstAncestorWhichIsA("BasePart")
+        end
+
+        if not part then
+            notify("COOK", "Part ProximityPrompt tidak ditemukan.", true)
+            return false
+        end
+
+        local dist = (root.Position - part.Position).Magnitude
+        local maxDist = tonumber(prompt.MaxActivationDistance) or 10
+        if dist > maxDist + 1.5 then
+            notify("COOK", string.format("Terlalu jauh %.1f / %.1f studs.", dist, maxDist), true)
+            return false
+        end
+
+        local hold = tonumber(prompt.HoldDuration) or 0
+        State.CurrentStep = "INTERACT: " ..
+            tostring(prompt.ActionText ~= "" and prompt.ActionText or prompt.Name)
+
+        -- Use the actual ProximityPrompt API first. This is the important fix:
+        -- the game receives the same prompt interaction shown by the E bubble.
+        local ok = pcall(function()
+            if hold > 0 then
+                prompt:InputHoldBegin()
+                task.wait(hold)
+                prompt:InputHoldEnd()
+            else
+                prompt:InputHoldBegin()
+                task.wait(0.08)
+                prompt:InputHoldEnd()
+            end
+        end)
+
+        -- Always release the prompt hold.
+        pcall(function()
+            prompt:InputHoldEnd()
+        end)
+
+        if ok then
+            task.wait(0.15)
+            return true
+        end
+
+        -- Fallback only if the prompt API is unavailable.
+        return pressE(math.max(0.08, hold))
     end
 
     local function promptSearchText(prompt)
@@ -1526,7 +1602,7 @@ rainGui.Parent = HiddenUI
             return false
         end
 
-        local distance = 8
+        local distance = 6
         local direction = root.CFrame.LookVector
         local params = RaycastParams.new()
         params.FilterType = Enum.RaycastFilterType.Exclude
@@ -1711,6 +1787,7 @@ rainGui.Parent = HiddenUI
     local function sellOneMarshmallow(itemName)
         if countItem(itemName) <= 0 then return false end
 
+        -- Equip the exact marshmallow BAG first.
         if not equipItem(itemName) then
             notify("SELL", "Gagal equip " .. tostring(itemName) .. ".", true)
             return false
@@ -1718,10 +1795,12 @@ rainGui.Parent = HiddenUI
 
         task.wait(0.4)
 
+        -- Find the selling interaction only after the correct bag is equipped.
         local prompt = findNearestInteractPrompt(30, {
             "sell",
             string.lower(itemName),
-            string.lower(itemName:gsub(" marshmallow", "")),
+            string.lower(itemName:gsub(" marshmellow bag", "")),
+            string.lower(itemName:gsub(" marshmallow bag", "")),
         })
 
         if not prompt then
@@ -1729,17 +1808,34 @@ rainGui.Parent = HiddenUI
             return false
         end
 
-        local hold = math.max(3.5, tonumber(prompt.HoldDuration) or 0)
+        -- Hold the interaction for 3.5-4.0 seconds.
+        local hold = 3.5 + (math.random(0, 5) / 10)
         hold = math.min(4.0, hold)
 
-        if not interactPrompt(prompt, hold) then
+        State.CurrentStep = string.format("HOLD E: %s (%.1fs)", itemName, hold)
+
+        -- Sell interaction memakai VirtualInputManager:
+        -- key-down E -> tahan 3.5-4.0s -> key-up E
+        local ok, err = pcall(function()
+            VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+            task.wait(hold)
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+        end)
+
+        -- Pastikan E dilepas walaupun terjadi error saat hold.
+        pcall(function()
+            VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+        end)
+
+        if not ok then
+            notify("SELL", "VirtualInputManager gagal: " .. tostring(err), true)
             return false
         end
 
         State.SoldCount += 1
         local price = CFG.SELL_PRICE[itemName] or 0
         State.TotalProfit += price
-        log(string.format("SELL: %s | +$%d", itemName, price))
+        log(string.format("SELL: %s | +$%d | HOLD E %.1fs", itemName, price, hold))
         task.wait(math.max(0.20, State.SellDelay))
         return true
     end
@@ -1866,7 +1962,7 @@ rainGui.Parent = HiddenUI
         actionButton(sl, "SELL MEDIUM", 165, 65, 135, 35, function() task.spawn(sellMarshmallow, CFG.MEDIUM, 1) end)
         actionButton(sl, "SELL SMALL", 315, 65, 135, 35, function() task.spawn(sellMarshmallow, CFG.SMALL, 1) end)
         actionButton(sl, "SELL ALL: L > M > S", 15, 108, 210, 35, function() task.spawn(sellAllMarshmallowsOrdered) end)
-        text(sl, "Equip Large -> hold E 3.5-4.0s -> delay -> Medium -> Small.", 15, 153, 440, 28, 9, CFG.MUTED)
+        text(sl, "Equip Large/Medium/Small Marshmellow Bag -> hold E 3.5-4.0s -> delay.", 15, 153, 440, 28, 9, CFG.MUTED)
         text(sl, "SELL DELAY", 15, 190, 100, 20, 10, CFG.MUTED)
         actionButton(sl, "-", 120, 186, 35, 30, function() State.SellDelay = math.max(0.20, State.SellDelay - 0.1); renderTab() end)
         text(sl, string.format("%.2fs", State.SellDelay), 160, 186, 70, 30, 11, CFG.TEXT)
@@ -3012,107 +3108,90 @@ rainGui.Parent = HiddenUI
         cookingBusy = true
         State.Cooking = true
 
-        -- URUTAN:
-        -- Water -> tunggu 1s -> E -> tunggu 22s
-        -- -> Sugar Block Bag -> tunggu 1s -> E
-        -- -> Gelatin -> E -> tunggu 1s -> E
-        -- -> masak sekitar 46s
-        -- -> equip Empty Bag -> tunggu 1s -> E
-        -- -> repeat
+        -- Exact sequence:
+        -- Equip Water -> 1s -> stove ProximityPrompt -> 22s
+        -- Equip Sugar Block Bag -> 1s -> stove ProximityPrompt
+        -- Equip Gelatin -> 1s -> stove ProximityPrompt -> 46s
+        -- Equip Empty Bag -> 1s -> stove ProximityPrompt -> complete notification
 
-        -- 1. WATER -> tunggu 1s -> E -> tunggu 22s
+        local function stopCooking()
+            State.Cooking = false
+            cookingBusy = false
+        end
+
+        local function cookInteract(label)
+            if not State.AutoCook then return false end
+            State.CurrentStep = label
+            return interactCookingPrompt()
+        end
+
+        -- WATER
         if not equipForCook(CFG.WATER) then
-            State.Cooking = false
-            cookingBusy = false
+            stopCooking()
             return
         end
 
-        waitStep(1, "WAIT WATER 1s")
-        if not State.AutoCook then
-            State.Cooking = false
-            cookingBusy = false
+        State.CurrentStep = "HOLD: WATER"
+        task.wait(1)
+
+        if not cookInteract("INTERACT: WATER") then
+            stopCooking()
             return
         end
 
-        State.CurrentStep = "PRESS E: WATER"
-        pressE()
+        task.wait(22)
 
-        waitStep(22, "WAIT WATER 22s")
-        if not State.AutoCook then
-            State.Cooking = false
-            cookingBusy = false
-            return
-        end
-
-        -- 2. SUGAR BLOCK BAG -> tunggu 1s -> E
+        -- SUGAR BLOCK BAG
         if not equipForCook(CFG.SUGAR) then
-            State.Cooking = false
-            cookingBusy = false
+            stopCooking()
             return
         end
 
-        waitStep(1, "WAIT SUGAR 1s")
-        if not State.AutoCook then
-            State.Cooking = false
-            cookingBusy = false
+        State.CurrentStep = "HOLD: SUGAR BLOCK BAG"
+        task.wait(1)
+
+        if not cookInteract("INTERACT: SUGAR BLOCK BAG") then
+            stopCooking()
             return
         end
 
-        State.CurrentStep = "PRESS E: SUGAR BLOCK BAG"
-        pressE()
-
-        -- 3. GELATIN -> E -> tunggu 1s -> E
+        -- GELATIN
         if not equipForCook(CFG.GELATIN) then
-            State.Cooking = false
-            cookingBusy = false
+            stopCooking()
             return
         end
 
-        State.CurrentStep = "PRESS E: GELATIN"
-        pressE()
+        State.CurrentStep = "HOLD: GELATIN"
+        task.wait(1)
 
-        waitStep(1, "WAIT GELATIN 1s")
-        if not State.AutoCook then
-            State.Cooking = false
-            cookingBusy = false
+        if not cookInteract("INTERACT: GELATIN") then
+            stopCooking()
             return
         end
 
-        State.CurrentStep = "PRESS E: START COOK"
-        pressE()
+        task.wait(46)
 
-        -- 4. Masak sekitar 46 detik
-        local cookDelay = randomDelay(46, 0.3, 1.2)
-        State.CurrentStep = "COOKING MARSHMALLOW"
-        notify("COOKING", string.format("%.1fs", cookDelay))
-        task.wait(cookDelay)
-
-        -- 5. Equip Empty Bag -> tunggu 1s -> E
-        if State.AutoCook then
-            if not equipForCook(CFG.EMPTY_BAG) then
-                State.Cooking = false
-                cookingBusy = false
-                return
-            end
-
-            waitStep(1, "WAIT EMPTY BAG 1s")
-            if not State.AutoCook then
-                State.Cooking = false
-                cookingBusy = false
-                return
-            end
-
-            State.CurrentStep = "PRESS E: EMPTY BAG / COLLECT"
-            pressE()
-            task.wait(0.4 + (math.random(1, 5) / 100))
-
-            State.CookedCount += 1
-            State.CurrentStep = "COMPLETE"
-            notify("COOK COMPLETE", "Marshmellow Ke " .. tostring(State.CookedCount) .. "x selesai.")
+        -- EMPTY BAG
+        if not equipForCook(CFG.EMPTY_BAG) then
+            stopCooking()
+            return
         end
 
-        State.Cooking = false
-        cookingBusy = false
+        State.CurrentStep = "HOLD: EMPTY BAG"
+        task.wait(1)
+
+        if not cookInteract("INTERACT: EMPTY BAG") then
+            stopCooking()
+            return
+        end
+
+        task.wait(0.4)
+
+        State.CookedCount += 1
+        State.CurrentStep = "COMPLETE"
+        notify("COOK COMPLETE", "Marshmellow Ke " .. tostring(State.CookedCount) .. "X selesai.")
+
+        stopCooking()
     end
 
     task.spawn(function()
@@ -3229,28 +3308,53 @@ rainGui.Parent = HiddenUI
         return Vector2.new(pos.X, pos.Y), (onScreen and pos.Z > 0)
     end
 
+    -- True 3D character bounding box projected to screen.
+    -- This uses Model:GetBoundingBox(), so the box follows the complete
+    -- character model instead of a fixed-size 2D rectangle.
     local function getCharacterBounds(char)
+        if not char or not char.Parent then return nil end
+
+        local camera = workspace.CurrentCamera
+        if not camera then return nil end
+
         local cf, size = char:GetBoundingBox()
         local half = size * 0.5
+
         local corners = {
-            cf * Vector3.new(-half.X,-half.Y,-half.Z), cf * Vector3.new(-half.X,-half.Y, half.Z),
-            cf * Vector3.new(-half.X, half.Y,-half.Z), cf * Vector3.new(-half.X, half.Y, half.Z),
-            cf * Vector3.new( half.X,-half.Y,-half.Z), cf * Vector3.new( half.X,-half.Y, half.Z),
-            cf * Vector3.new( half.X, half.Y,-half.Z), cf * Vector3.new( half.X, half.Y, half.Z),
+            Vector3.new(-half.X, -half.Y, -half.Z),
+            Vector3.new(-half.X, -half.Y,  half.Z),
+            Vector3.new(-half.X,  half.Y, -half.Z),
+            Vector3.new(-half.X,  half.Y,  half.Z),
+            Vector3.new( half.X, -half.Y, -half.Z),
+            Vector3.new( half.X, -half.Y,  half.Z),
+            Vector3.new( half.X,  half.Y, -half.Z),
+            Vector3.new( half.X,  half.Y,  half.Z),
         }
+
         local minX, minY = math.huge, math.huge
         local maxX, maxY = -math.huge, -math.huge
-        local visible = false
-        for _, worldPos in ipairs(corners) do
-            local v, on = workspace.CurrentCamera:WorldToViewportPoint(worldPos)
+        local anyFront = false
+        local anyOnScreen = false
+
+        for _, localCorner in ipairs(corners) do
+            local worldCorner = cf:PointToWorldSpace(localCorner)
+            local v, onScreen = camera:WorldToViewportPoint(worldCorner)
+
             if v.Z > 0 then
-                visible = visible or on
-                minX = math.min(minX, v.X); minY = math.min(minY, v.Y)
-                maxX = math.max(maxX, v.X); maxY = math.max(maxY, v.Y)
+                anyFront = true
+                minX = math.min(minX, v.X)
+                minY = math.min(minY, v.Y)
+                maxX = math.max(maxX, v.X)
+                maxY = math.max(maxY, v.Y)
+                anyOnScreen = anyOnScreen or onScreen
             end
         end
-        if minX == math.huge then return nil end
-        return minX, minY, maxX, maxY, visible
+
+        if not anyFront then
+            return nil
+        end
+
+        return minX, minY, maxX, maxY, anyOnScreen
     end
 
     local function createESP(player)
@@ -3272,6 +3376,7 @@ rainGui.Parent = HiddenUI
             ZIndex = 110,
             Visible = false
         })
+
         local boxStroke = Instance.new("UIStroke")
         boxStroke.Color = getESPColor()
         boxStroke.Thickness = 2
@@ -3284,6 +3389,7 @@ rainGui.Parent = HiddenUI
             ZIndex = 111,
             Visible = false
         })
+
         local healthFill = new("Frame", {
             BackgroundColor3 = getESPColor(),
             BorderSizePixel = 0,
@@ -3307,43 +3413,54 @@ rainGui.Parent = HiddenUI
         })
 
         local skeleton = {}
-        for i = 1, 18 do skeleton[i] = makeLine(rootGui, 113) end
+        for i = 1, 18 do
+            skeleton[i] = makeLine(rootGui, 113)
+        end
+
         local tracer = makeLine(rootGui, 114)
         tracer.Visible = false
 
-        local highlight = Instance.new("Highlight")
-        highlight.Name = "7VxESPHighlight"
-        highlight.Adornee = char
-        highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-        highlight.FillTransparency = 1
-        highlight.OutlineTransparency = State.BoxESP and 0 or 1
-        highlight.OutlineColor = getESPColor()
-        highlight.Enabled = State.ESP
-        highlight.Parent = char
-
         return {
-            root=rootGui, box=box, boxStroke=boxStroke, healthBack=healthBack, healthFill=healthFill,
-            info=info, skeleton=skeleton, tracer=tracer, highlight=highlight
+            root = rootGui,
+            box = box,
+            boxStroke = boxStroke,
+            healthBack = healthBack,
+            healthFill = healthFill,
+            info = info,
+            skeleton = skeleton,
+            tracer = tracer,
+            character = char
         }
     end
 
     local function updateSkeleton(data, char)
         local pairsList = {
-            {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},{"UpperTorso","LeftUpperArm"},
-            {"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},{"UpperTorso","RightUpperArm"},
-            {"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},{"LowerTorso","LeftUpperLeg"},
-            {"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},{"LowerTorso","RightUpperLeg"},
+            {"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
+            {"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},
+            {"LeftLowerArm","LeftHand"},{"UpperTorso","RightUpperArm"},
+            {"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},
+            {"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},
+            {"LeftLowerLeg","LeftFoot"},{"LowerTorso","RightUpperLeg"},
             {"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"},
-            {"Head","Torso"},{"Torso","Left Arm"},{"Left Arm","Left Leg"},{"Torso","Right Arm"}
+
+            -- R6 fallback pairs
+            {"Head","Torso"},{"Torso","Left Arm"},{"Left Arm","Left Leg"},
+            {"Torso","Right Arm"}
         }
+
         local color = getESPColor()
+
         for i, pair in ipairs(pairsList) do
             local line = data.skeleton[i]
-            local a, b = char:FindFirstChild(pair[1]), char:FindFirstChild(pair[2])
+            local a = char:FindFirstChild(pair[1])
+            local b = char:FindFirstChild(pair[2])
+
             line.BackgroundColor3 = color
+
             if State.ESP and a and b then
                 local ap, ao = getScreenPoint(a)
                 local bp, bo = getScreenPoint(b)
+
                 if ap and bp and (ao or bo) then
                     setLine(line, ap, bp, 2)
                 else
@@ -3355,14 +3472,92 @@ rainGui.Parent = HiddenUI
         end
     end
 
+    local function updateESPPlayer(player, data, char, hum, dist)
+        local color = getESPColor()
+
+        data.boxStroke.Color = color
+        data.healthFill.BackgroundColor3 = color
+        data.info.TextColor3 = color
+
+        local minX, minY, maxX, maxY, onScreen = getCharacterBounds(char)
+
+        if minX and maxX and onScreen then
+            local w = math.max(2, maxX - minX)
+            local h = math.max(2, maxY - minY)
+
+            -- Exact projected 3D bounding box.
+            data.box.Position = UDim2.fromOffset(minX, minY)
+            data.box.Size = UDim2.fromOffset(w, h)
+            data.box.Visible = State.BoxESP
+
+            data.healthBack.Position = UDim2.fromOffset(minX - 6, minY)
+            data.healthBack.Size = UDim2.fromOffset(3, h)
+            data.healthBack.Visible = State.ShowHealth
+
+            local hp = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
+            data.healthFill.Size = UDim2.new(1, 0, hp, 0)
+            data.healthFill.Position = UDim2.new(0, 0, 1, 0)
+
+            local lines = {}
+
+            if State.ShowName then
+                table.insert(lines, player.DisplayName .. "  @" .. player.Name)
+            end
+
+            if State.ShowStuds then
+                table.insert(lines, string.format("%.1f studs", dist))
+            end
+
+            if State.ShowHold then
+                table.insert(lines, "HOLD: " .. getHeldItem(player))
+            end
+
+            if State.ShowInventory then
+                local inv = getInventory(player)
+                local parts = {}
+
+                for n, c in pairs(inv or {}) do
+                    table.insert(parts, n .. " x" .. c)
+                end
+
+                table.sort(parts)
+                table.insert(lines, #parts > 0 and
+                    ("INV: " .. table.concat(parts, ", ")) or "INV: -")
+            end
+
+            data.info.Position = UDim2.fromOffset(minX, math.max(2, minY - 32))
+            data.info.Size = UDim2.fromOffset(w, 30)
+            data.info.Text = table.concat(lines, "\n")
+            data.info.Visible =
+                State.ShowName or State.ShowStuds or State.ShowHold or State.ShowInventory
+        else
+            data.box.Visible = false
+            data.healthBack.Visible = false
+            data.info.Visible = false
+
+            for _, line in ipairs(data.skeleton) do
+                line.Visible = false
+            end
+
+            data.tracer.Visible = false
+        end
+
+        updateSkeleton(data, char)
+    end
+
     RunService.RenderStepped:Connect(function()
         if not State.ESP then
             if espOverlay then espOverlay.Enabled = false end
-            for player in pairs(esp or {}) do destroyESP(player) end
+            for player in pairs(esp or {}) do
+                destroyESP(player)
+            end
             return
         end
 
-        if espOverlay then espOverlay.Enabled = true end
+        if espOverlay then
+            espOverlay.Enabled = true
+        end
+
         local localRoot = getRoot()
         if not localRoot then return end
 
@@ -3378,65 +3573,25 @@ rainGui.Parent = HiddenUI
 
                 if root and head and hum and hum.Health > 0 then
                     local dist = (localRoot.Position - root.Position).Magnitude
+
                     if dist <= State.MaxDistance then
                         seen[player] = true
+
                         local data = esp[player]
-                        if not data or not data.highlight or data.highlight.Adornee ~= char then
+                        if not data or data.character ~= char or not data.root.Parent then
                             destroyESP(player)
                             data = createESP(player)
-                            if data then esp[player] = data end
+                            if data then
+                                esp[player] = data
+                            end
                         end
 
                         if data then
-                            local color = getESPColor()
-                            data.highlight.Enabled = State.ESP
-                            data.highlight.OutlineColor = color
-                            data.highlight.OutlineTransparency = State.BoxESP and 0 or 1
-                            data.boxStroke.Color = color
-                            data.healthFill.BackgroundColor3 = color
-                            data.info.TextColor3 = color
+                            updateESPPlayer(player, data, char, hum, dist)
 
-                            local minX, minY, maxX, maxY, onScreen = getCharacterBounds(char)
-                            if minX and maxX and onScreen then
-                                local w = math.max(18, maxX - minX)
-                                local h = math.max(25, maxY - minY)
-                                data.box.Position = UDim2.fromOffset(minX, minY)
-                                data.box.Size = UDim2.fromOffset(w, h)
-                                data.box.Visible = State.BoxESP
-
-                                data.healthBack.Position = UDim2.fromOffset(minX - 6, minY)
-                                data.healthBack.Size = UDim2.fromOffset(3, h)
-                                data.healthBack.Visible = State.ShowHealth
-
-                                local hp = math.clamp(hum.Health / math.max(hum.MaxHealth, 1), 0, 1)
-                                data.healthFill.Size = UDim2.new(1, 0, hp, 0)
-                                data.healthFill.Position = UDim2.new(0, 0, 1, 0)
-
-                                local lines = {}
-                                if State.ShowName then table.insert(lines, player.DisplayName .. "  @" .. player.Name) end
-                                if State.ShowStuds then table.insert(lines, string.format("%.1f studs", dist)) end
-                                if State.ShowHold then table.insert(lines, "HOLD: " .. getHeldItem(player)) end
-                                if State.ShowInventory then
-                                    local inv = getInventory(player)
-                                    local parts = {}
-                                    for n,c in pairs(inv or {}) do table.insert(parts, n .. " x" .. c) end
-                                    table.sort(parts)
-                                    table.insert(lines, #parts > 0 and ("INV: " .. table.concat(parts, ", ")) or "INV: -")
-                                end
-
-                                data.info.Position = UDim2.fromOffset(minX, math.max(2, minY - 32))
-                                data.info.Size = UDim2.fromOffset(w, 30)
-                                data.info.Text = table.concat(lines, "\n")
-                                data.info.Visible = State.ShowName or State.ShowStuds or State.ShowHold or State.ShowInventory
-                            else
-                                data.box.Visible = false
-                                data.healthBack.Visible = false
-                                data.info.Visible = false
-                            end
-
-                            updateSkeleton(data, char)
                             if State.Tracers and dist < nearestDist then
-                                nearest, nearestDist = player, dist
+                                nearest = player
+                                nearestDist = dist
                             end
                         end
                     end
@@ -3444,19 +3599,27 @@ rainGui.Parent = HiddenUI
             end
         end
 
+        for player in pairs(esp or {}) do
+            if not seen[player] then
+                destroyESP(player)
+            end
+        end
+
         for player, data in pairs(esp or {}) do
-            data.tracer.Visible = false
-            if not seen[player] or not player.Character then destroyESP(player) end
+            if data and data.tracer then
+                data.tracer.Visible = false
+            end
         end
 
         if State.Tracers and nearest and esp[nearest] then
-            local head = nearest.Character and (nearest.Character:FindFirstChild("Head") or nearest.Character:FindFirstChild("HumanoidRootPart"))
-            local hp, on = getScreenPoint(head)
-            if hp and on then
-                local mp = UserInputService:GetMouseLocation()
-                local data = esp[nearest]
-                setLine(data.tracer, Vector2.new(mp.X, mp.Y), hp, 2)
-                data.tracer.BackgroundColor3 = getESPColor()
+            local data = esp[nearest]
+            local root = nearest.Character and nearest.Character:FindFirstChild("HumanoidRootPart")
+            if root then
+                local p, ok = getScreenPoint(root)
+                if p and ok then
+                    local viewport = workspace.CurrentCamera.ViewportSize
+                    setLine(data.tracer, Vector2.new(viewport.X / 2, viewport.Y), p, 1.5)
+                end
             end
         end
     end)
